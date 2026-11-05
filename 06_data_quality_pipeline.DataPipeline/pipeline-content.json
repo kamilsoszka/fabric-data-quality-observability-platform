@@ -1,0 +1,38 @@
+{
+  "properties": {
+    "activities": [
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
+          "notebookId": "31f22089-f9ea-4f28-8182-712020d46f6b",
+          "workspaceId": "00000000-0000-0000-0000-000000000000"
+        },
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "Run_Quality_Pipeline",
+        "dependsOn": []
+      },
+      {
+        "type": "Fail",
+        "typeProperties": {
+          "message": "DQ_PIPELINE_FAILED",
+          "errorCode": "The data quality notebook execution failed"
+        },
+        "name": "Quality_Pipeline_Failed",
+        "dependsOn": [
+          {
+            "activity": "Run_Quality_Pipeline",
+            "dependencyConditions": [
+              "Failed"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
