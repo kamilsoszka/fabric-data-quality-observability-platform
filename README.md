@@ -68,6 +68,19 @@ PySpark quality validation
                        v
              04_monitoring tables
 ```
+## Project Screenshots
+
+### Lakehouse Quality Layers
+
+![Microsoft Fabric Lakehouse quality layers](docs/images/01_lakehouse_quality_layers.png)
+
+### Data Quality Pipeline and Error Handling
+
+![Microsoft Fabric data quality pipeline](docs/images/02_quality_pipeline_error_handling.png)
+
+### Development Workspace and Git Synchronization
+
+![Microsoft Fabric workspace synchronized with GitHub](docs/images/03_workspace_git_synced.png)
 
 ## Lakehouse Organization
 
