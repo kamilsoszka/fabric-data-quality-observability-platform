@@ -330,7 +330,8 @@ No token or secret is stored in the repository.
 ├── 05_run_quality_pipeline.Notebook/
 ├── 06_data_quality_pipeline.DataPipeline/
 ├── lh_data_quality.Lakehouse/
-└── README.md
+├── README.md
+└── LICENSE
 ```
 
 ## Idempotency
@@ -398,6 +399,19 @@ If a token is exposed, revoke it immediately in GitHub and create a replacement 
 - GitHub
 - NYC TLC Yellow Taxi Trip Records
 
+## Skills Demonstrated
+
+- **Data Engineering:** Building a medallion architecture (Bronze, Silver, Quarantine) with PySpark and Delta Lake in Microsoft Fabric.
+- **Data Quality & Observability:** Implementing rule-based validation, schema contracts, reconciliation, and freshness SLAs.
+- **Data Orchestration:** Managing end-to-end workflows using Fabric Data Factory pipelines with error handling.
+- **DevOps & CI/CD:** Utilizing Fabric Deployment Pipelines (Dev to Test) and GitHub integration with fine-grained access tokens.
+
+## Challenges and Lessons Learned
+
+- **Handling Schema Drift:** Implementing strict schema validation (23 columns) ensures that unexpected changes in source data fail the pipeline early, protecting downstream analytical models.
+- **Reconciliation Logic:** Ensuring the mathematical balance between Bronze, Silver, and Quarantine layers (Bronze = Silver + Quarantine) was critical to prevent silent data loss.
+- **Orchestration & Error Handling:** Configuring the Fabric Data Pipeline required understanding 'On failure' paths to guarantee that operational teams are notified when a quality check fails.
+
 ## License
 
-This project is available under the LICENSE.
+This project is licensed under the [MIT License](LICENSE).
