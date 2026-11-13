@@ -22,21 +22,25 @@
 
 # CELL ********************
 
+import json
+from datetime import datetime, timezone
+
 from pyspark.sql import functions as F
-from pyspark.sql.types import (
-    StructType,
-    StructField,
-    StringType
-)
+from pyspark.sql import types as T
 
-# Define the source table
+
+# Define validation configuration
 source_table = "`01_bronze`.yellow_taxi_trips"
+source_table_display_name = "01_bronze.yellow_taxi_trips"
+validation_results_table = (
+    "`04_monitoring`.schema_validation_results"
+)
+source_period = "2026-01"
 
-# Define the expected schema contract
 expected_schema = [
     ("VendorID", "int"),
-    ("tpep_pickup_datetime", "timestamp_ntz"),
-    ("tpep_dropoff_datetime", "timestamp_ntz"),
+    ("tpep_pickup_datetime", "timestamp"),
+    ("tpep_dropoff_datetime", "timestamp"),
     ("passenger_count", "bigint"),
     ("trip_distance", "double"),
     ("RatecodeID", "bigint"),
@@ -56,132 +60,293 @@ expected_schema = [
     ("cbd_congestion_fee", "double"),
     ("_ingested_at", "timestamp"),
     ("_source_file", "string"),
-    ("_source_period", "string")
+    ("_source_period", "string"),
 ]
 
-# Read the actual table schema
+
+def require_table(table_name):
+    if not spark.catalog.tableExists(table_name):
+        raise RuntimeError(
+            f"Required table does not exist: {table_name}"
+        )
+
+
+def create_validation_rows(
+    expected_columns,
+    actual_columns,
+):
+    maximum_length = max(
+        len(expected_columns),
+        len(actual_columns),
+    )
+
+    rows = []
+
+    for position in range(maximum_length):
+        expected_column = (
+            expected_columns[position]
+            if position < len(expected_columns)
+            else (None, None)
+        )
+
+        actual_column = (
+            actual_columns[position]
+            if position < len(actual_columns)
+            else (None, None)
+        )
+
+        expected_name, expected_type = expected_column
+        actual_name, actual_type = actual_column
+
+        if expected_name is None:
+            validation_status = "UNEXPECTED_COLUMN"
+        elif actual_name is None:
+            validation_status = "MISSING_COLUMN"
+        elif expected_name != actual_name:
+            validation_status = (
+                "COLUMN_NAME_OR_ORDER_MISMATCH"
+            )
+        elif expected_type != actual_type:
+            validation_status = "DATA_TYPE_MISMATCH"
+        else:
+            validation_status = "PASSED"
+
+        rows.append(
+            (
+                position + 1,
+                expected_name,
+                expected_type,
+                actual_name,
+                actual_type,
+                validation_status,
+            )
+        )
+
+    return rows
+
+
+validation_started_at = datetime.now(
+    timezone.utc
+).replace(tzinfo=None)
+
+print(
+    f"Schema validation started at: "
+    f"{validation_started_at}"
+)
+print(f"Source table: {source_table_display_name}")
+
+require_table(source_table)
+
 actual_struct = spark.table(source_table).schema
 
 actual_schema = [
-    (field.name, field.dataType.simpleString())
+    (
+        field.name,
+        field.dataType.simpleString(),
+    )
     for field in actual_struct.fields
 ]
 
-# Compare expected and actual schemas
-maximum_length = max(
-    len(expected_schema),
-    len(actual_schema)
+validation_rows = create_validation_rows(
+    expected_columns=expected_schema,
+    actual_columns=actual_schema,
 )
 
-validation_rows = []
-
-for position in range(maximum_length):
-    expected_column = (
-        expected_schema[position]
-        if position < len(expected_schema)
-        else (None, None)
-    )
-
-    actual_column = (
-        actual_schema[position]
-        if position < len(actual_schema)
-        else (None, None)
-    )
-
-    expected_name, expected_type = expected_column
-    actual_name, actual_type = actual_column
-
-    if expected_name is None:
-        validation_status = "UNEXPECTED_COLUMN"
-    elif actual_name is None:
-        validation_status = "MISSING_COLUMN"
-    elif expected_name != actual_name:
-        validation_status = "COLUMN_NAME_OR_ORDER_MISMATCH"
-    elif expected_type != actual_type:
-        validation_status = "DATA_TYPE_MISMATCH"
-    else:
-        validation_status = "PASSED"
-
-    validation_rows.append((
-        position + 1,
-        expected_name,
-        expected_type,
-        actual_name,
-        actual_type,
-        validation_status
-    ))
-
-# Define the validation result schema
-result_schema = StructType([
-    StructField("ordinal_position", StringType(), False),
-    StructField("expected_column_name", StringType(), True),
-    StructField("expected_data_type", StringType(), True),
-    StructField("actual_column_name", StringType(), True),
-    StructField("actual_data_type", StringType(), True),
-    StructField("validation_status", StringType(), False)
+result_schema = T.StructType([
+    T.StructField(
+        "ordinal_position",
+        T.IntegerType(),
+        False,
+    ),
+    T.StructField(
+        "expected_column_name",
+        T.StringType(),
+        True,
+    ),
+    T.StructField(
+        "expected_data_type",
+        T.StringType(),
+        True,
+    ),
+    T.StructField(
+        "actual_column_name",
+        T.StringType(),
+        True,
+    ),
+    T.StructField(
+        "actual_data_type",
+        T.StringType(),
+        True,
+    ),
+    T.StructField(
+        "validation_status",
+        T.StringType(),
+        False,
+    ),
 ])
-
-# Convert ordinal positions to strings for stable schema creation
-validation_rows_as_strings = [
-    (
-        str(row[0]),
-        row[1],
-        row[2],
-        row[3],
-        row[4],
-        row[5]
-    )
-    for row in validation_rows
-]
 
 schema_validation_results = (
     spark.createDataFrame(
-        validation_rows_as_strings,
-        schema=result_schema
+        validation_rows,
+        schema=result_schema,
     )
     .withColumn(
         "validation_run_at",
-        F.current_timestamp()
+        F.lit(validation_started_at).cast(
+            T.TimestampType()
+        ),
     )
     .withColumn(
         "source_table",
-        F.lit("01_bronze.yellow_taxi_trips")
+        F.lit(source_table_display_name),
     )
     .withColumn(
         "source_period",
-        F.lit("2026-01")
+        F.lit(source_period),
     )
 )
 
-# Count schema mismatches
-failed_columns = (
+validation_summary = (
     schema_validation_results
-    .filter(F.col("validation_status") != "PASSED")
-    .count()
+    .agg(
+        F.count("*").alias("total_columns"),
+        F.sum(
+            F.when(
+                F.col("validation_status") == "PASSED",
+                1,
+            ).otherwise(0)
+        ).alias("passed_columns"),
+        F.sum(
+            F.when(
+                F.col("validation_status") != "PASSED",
+                1,
+            ).otherwise(0)
+        ).alias("failed_columns"),
+    )
+    .first()
 )
 
-total_columns = schema_validation_results.count()
-passed_columns = total_columns - failed_columns
+total_columns = validation_summary["total_columns"]
+passed_columns = validation_summary["passed_columns"]
+failed_columns = validation_summary["failed_columns"]
 
-# Save the validation results
-schema_validation_results.write \
-    .format("delta") \
-    .mode("overwrite") \
-    .option("overwriteSchema", "true") \
-    .saveAsTable(
-        "`04_monitoring`.schema_validation_results"
+display(
+    schema_validation_results.orderBy(
+        "ordinal_position"
+    )
+)
+
+if total_columns != len(expected_schema):
+    raise RuntimeError(
+        "Schema validation produced an unexpected "
+        "number of result rows. "
+        f"Expected: {len(expected_schema)}. "
+        f"Actual: {total_columns}."
     )
 
-display(schema_validation_results)
+if failed_columns != 0:
+    failed_results = (
+        schema_validation_results
+        .filter(
+            F.col("validation_status") != "PASSED"
+        )
+        .orderBy("ordinal_position")
+    )
 
-assert failed_columns == 0, (
-    f"Schema validation failed: "
-    f"{failed_columns} mismatches detected."
+    display(failed_results)
+
+    raise RuntimeError(
+        "Schema validation failed. "
+        f"Mismatches detected: {failed_columns}."
+    )
+
+(
+    schema_validation_results
+    .write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(validation_results_table)
 )
+
+persisted_results = spark.table(
+    validation_results_table
+)
+
+persisted_summary = (
+    persisted_results
+    .agg(
+        F.count("*").alias("total_columns"),
+        F.sum(
+            F.when(
+                F.col("validation_status") == "PASSED",
+                1,
+            ).otherwise(0)
+        ).alias("passed_columns"),
+        F.sum(
+            F.when(
+                F.col("validation_status") != "PASSED",
+                1,
+            ).otherwise(0)
+        ).alias("failed_columns"),
+        F.countDistinct(
+            "ordinal_position"
+        ).alias("distinct_positions"),
+    )
+    .first()
+)
+
+if (
+    persisted_summary["total_columns"]
+    != len(expected_schema)
+):
+    raise RuntimeError(
+        "Persisted schema validation results do not "
+        "contain exactly 23 rows."
+    )
+
+if (
+    persisted_summary["distinct_positions"]
+    != len(expected_schema)
+):
+    raise RuntimeError(
+        "Persisted schema validation results contain "
+        "duplicate or missing ordinal positions."
+    )
+
+if persisted_summary["failed_columns"] != 0:
+    raise RuntimeError(
+        "Persisted schema validation results contain "
+        "failed columns."
+    )
+
+validation_completed_at = datetime.now(
+    timezone.utc
+).replace(tzinfo=None)
+
+result_payload = {
+    "status": "PASSED",
+    "source_table": source_table_display_name,
+    "source_period": source_period,
+    "total_columns": total_columns,
+    "passed_columns": passed_columns,
+    "failed_columns": failed_columns,
+    "validation_started_at": (
+        validation_started_at.isoformat()
+    ),
+    "validation_completed_at": (
+        validation_completed_at.isoformat()
+    ),
+}
 
 print(
     f"Schema validation PASSED: "
     f"{passed_columns} of {total_columns} columns."
+)
+print(json.dumps(result_payload, indent=2))
+
+notebookutils.notebook.exit(
+    json.dumps(result_payload)
 )
 
 # METADATA ********************

@@ -22,6 +22,30 @@
 
 # CELL ********************
 
+# Fabric notebook source
+
+# METADATA ********************
+
+# META {
+# META   "kernel_info": {
+# META     "name": "synapse_pyspark"
+# META   },
+# META   "dependencies": {
+# META     "lakehouse": {
+# META       "default_lakehouse": "e3c81730-469e-4ca0-a08f-bf941ac02c6f",
+# META       "default_lakehouse_name": "lh_data_quality",
+# META       "default_lakehouse_workspace_id": "4059fec2-4e4c-4b6d-b7f8-273305c44bed",
+# META       "known_lakehouses": [
+# META         {
+# META           "id": "e3c81730-469e-4ca0-a08f-bf941ac02c6f"
+# META         }
+# META       ]
+# META     }
+# META   }
+# META }
+
+# CELL ********************
+
 from datetime import datetime
 
 from pyspark.sql import functions as F
@@ -169,7 +193,10 @@ test_data = [
     )
 ]
 
-df_tests = spark.createDataFrame(test_data, schema=test_schema)
+df_tests = spark.createDataFrame(
+    test_data,
+    schema=test_schema
+)
 
 # ============================================================
 # 3. Apply the production quality rules
@@ -231,7 +258,10 @@ test_results = (
     .withColumn(
         "test_status",
         F.when(
-            F.expr("array_contains(detected_rules, expected_rule)"),
+            F.array_contains(
+                F.col("detected_rules"),
+                F.col("expected_rule")
+            ),
             F.lit("PASSED")
         ).otherwise(F.lit("FAILED"))
     )
@@ -245,14 +275,15 @@ test_results = (
 )
 
 # ============================================================
-# 5. Create the test summary
+# 5. Validate and display the test results
 # ============================================================
 
-test_summary = (
+total_tests = test_results.count()
+
+passed_tests = (
     test_results
-    .groupBy("test_status")
+    .filter(F.col("test_status") == "PASSED")
     .count()
-    .orderBy("test_status")
 )
 
 failed_tests = (
@@ -261,21 +292,352 @@ failed_tests = (
     .count()
 )
 
-total_tests = test_results.count()
-passed_tests = total_tests - failed_tests
+duplicate_test_count = (
+    test_results
+    .groupBy("test_name")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+null_expected_rule_count = (
+    test_results
+    .filter(F.col("expected_rule").isNull())
+    .count()
+)
+
+empty_detected_rules_count = (
+    test_results
+    .filter(F.size(F.col("detected_rules")) == 0)
+    .count()
+)
+
+test_summary = (
+    test_results
+    .groupBy("test_status")
+    .count()
+    .orderBy("test_status")
+)
 
 display(test_results)
 display(test_summary)
 
-# ============================================================
-# 6. Fail the notebook if any test fails
-# ============================================================
-
-assert failed_tests == 0, (
-    f"Negative tests failed: {failed_tests} of {total_tests}"
+assert total_tests == 9, (
+    f"Negative test count validation failed: "
+    f"expected 9, found {total_tests}."
 )
 
-print(f"All negative tests PASSED: {passed_tests} of {total_tests}.")
+assert duplicate_test_count == 0, (
+    f"Duplicate test validation failed: "
+    f"found {duplicate_test_count} duplicate test names."
+)
+
+assert null_expected_rule_count == 0, (
+    f"Expected rule validation failed: "
+    f"found {null_expected_rule_count} null values."
+)
+
+assert empty_detected_rules_count == 0, (
+    f"Detected rule validation failed: "
+    f"found {empty_detected_rules_count} empty rule arrays."
+)
+
+assert failed_tests == 0, (
+    f"Negative tests failed: "
+    f"{failed_tests} of {total_tests}."
+)
+
+assert passed_tests == total_tests, (
+    f"Negative test summary validation failed: "
+    f"expected {total_tests} passed tests, found {passed_tests}."
+)
+
+print(
+    f"All negative tests PASSED: "
+    f"{passed_tests} of {total_tests}."
+)
+
+# ============================================================
+# 6. Save SQL-compatible negative test results
+# ============================================================
+
+target_table = "`04_monitoring`.negative_test_results"
+
+negative_test_results = (
+    test_results
+    .withColumn(
+        "detected_rules",
+        F.to_json(F.col("detected_rules"))
+    )
+    .withColumn(
+        "test_run_at",
+        F.current_timestamp()
+    )
+    .withColumn(
+        "source_period",
+        F.lit("2026-01")
+    )
+)
+
+detected_rules_type = (
+    negative_test_results
+    .schema["detected_rules"]
+    .dataType
+)
+
+assert isinstance(detected_rules_type, StringType), (
+    "Pre-write schema validation failed: "
+    "detected_rules must be STRING."
+)
+
+assert negative_test_results.count() == total_tests, (
+    "Pre-write row count validation failed."
+)
+
+negative_test_results.write \
+    .format("delta") \
+    .mode("overwrite") \
+    .option("overwriteSchema", "true") \
+    .saveAsTable(target_table)
+
+# ============================================================
+# 7. Validate the persisted negative test results
+# ============================================================
+
+saved_results = spark.table(target_table)
+
+saved_row_count = saved_results.count()
+
+saved_detected_rules_type = (
+    saved_results
+    .schema["detected_rules"]
+    .dataType
+)
+
+null_detected_rules_count = (
+    saved_results
+    .filter(F.col("detected_rules").isNull())
+    .count()
+)
+
+invalid_json_count = (
+    saved_results
+    .filter(
+        F.from_json(
+            F.col("detected_rules"),
+            "array<string>"
+        ).isNull()
+    )
+    .count()
+)
+
+failed_saved_test_count = (
+    saved_results
+    .filter(F.col("test_status") != "PASSED")
+    .count()
+)
+
+duplicate_saved_test_count = (
+    saved_results
+    .groupBy("test_name")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+assert saved_row_count == total_tests, (
+    f"Post-write row count validation failed: "
+    f"expected {total_tests}, found {saved_row_count}."
+)
+
+assert isinstance(saved_detected_rules_type, StringType), (
+    "Post-write schema validation failed: "
+    "detected_rules must be STRING."
+)
+
+assert null_detected_rules_count == 0, (
+    f"Post-write null validation failed: "
+    f"found {null_detected_rules_count} null detected_rules values."
+)
+
+assert invalid_json_count == 0, (
+    f"Post-write JSON validation failed: "
+    f"found {invalid_json_count} invalid detected_rules values."
+)
+
+assert failed_saved_test_count == 0, (
+    f"Post-write test status validation failed: "
+    f"found {failed_saved_test_count} failed tests."
+)
+
+assert duplicate_saved_test_count == 0, (
+    f"Post-write duplicate validation failed: "
+    f"found {duplicate_saved_test_count} duplicate test names."
+)
+
+display(saved_results.orderBy("test_name"))
+
+print(f"Saved table: {target_table}")
+print(f"Saved rows: {saved_row_count}")
+print("detected_rules data type: STRING")
+print("Negative test results validation PASSED.")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+from pyspark.sql import functions as F
+
+# ============================================================
+# 8. Reconcile the Bronze, Silver, and Quarantine layers
+# ============================================================
+
+bronze_table = "`01_bronze`.yellow_taxi_trips"
+silver_table = "`02_silver`.yellow_taxi_trips"
+quarantine_table = "`03_quarantine`.yellow_taxi_trips"
+reconciliation_table = "`04_monitoring`.reconciliation_results"
+
+required_tables = [
+    bronze_table,
+    silver_table,
+    quarantine_table
+]
+
+missing_tables = [
+    table_name
+    for table_name in required_tables
+    if not spark.catalog.tableExists(table_name)
+]
+
+assert len(missing_tables) == 0, (
+    f"Required table validation failed. "
+    f"Missing tables: {missing_tables}"
+)
+
+bronze_count = spark.table(bronze_table).count()
+silver_count = spark.table(silver_table).count()
+quarantine_count = spark.table(quarantine_table).count()
+
+reconciled_count = silver_count + quarantine_count
+count_difference = bronze_count - reconciled_count
+
+reconciliation_status = (
+    "PASSED"
+    if count_difference == 0
+    else "FAILED"
+)
+
+reconciliation_result = (
+    spark.createDataFrame(
+        [(
+            "yellow_taxi_trips",
+            bronze_count,
+            silver_count,
+            quarantine_count,
+            reconciled_count,
+            count_difference,
+            reconciliation_status
+        )],
+        [
+            "dataset_name",
+            "bronze_count",
+            "silver_count",
+            "quarantine_count",
+            "reconciled_count",
+            "count_difference",
+            "reconciliation_status"
+        ]
+    )
+    .withColumn(
+        "reconciliation_run_at",
+        F.current_timestamp()
+    )
+    .withColumn(
+        "source_period",
+        F.lit("2026-01")
+    )
+)
+
+assert bronze_count > 0, (
+    "Reconciliation validation failed: "
+    "Bronze contains no records."
+)
+
+assert silver_count >= 0, (
+    "Reconciliation validation failed: "
+    "Silver count cannot be negative."
+)
+
+assert quarantine_count >= 0, (
+    "Reconciliation validation failed: "
+    "Quarantine count cannot be negative."
+)
+
+assert count_difference == 0, (
+    f"Reconciliation failed. "
+    f"Difference: {count_difference}."
+)
+
+reconciliation_result.write \
+    .format("delta") \
+    .mode("overwrite") \
+    .option("overwriteSchema", "true") \
+    .saveAsTable(reconciliation_table)
+
+# ============================================================
+# 9. Validate the persisted reconciliation result
+# ============================================================
+
+saved_reconciliation = spark.table(reconciliation_table)
+
+saved_reconciliation_count = saved_reconciliation.count()
+
+failed_reconciliation_count = (
+    saved_reconciliation
+    .filter(F.col("reconciliation_status") != "PASSED")
+    .count()
+)
+
+nonzero_difference_count = (
+    saved_reconciliation
+    .filter(F.col("count_difference") != 0)
+    .count()
+)
+
+assert saved_reconciliation_count == 1, (
+    f"Post-write reconciliation row count validation failed: "
+    f"expected 1, found {saved_reconciliation_count}."
+)
+
+assert failed_reconciliation_count == 0, (
+    f"Post-write reconciliation status validation failed: "
+    f"found {failed_reconciliation_count} failed rows."
+)
+
+assert nonzero_difference_count == 0, (
+    f"Post-write reconciliation difference validation failed: "
+    f"found {nonzero_difference_count} rows with a nonzero difference."
+)
+
+display(saved_reconciliation)
+
+print("Reconciliation PASSED.")
+print(f"Bronze records: {bronze_count}")
+print(f"Silver records: {silver_count}")
+print(f"Quarantine records: {quarantine_count}")
+print(f"Count difference: {count_difference}")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
 
 # METADATA ********************
 
